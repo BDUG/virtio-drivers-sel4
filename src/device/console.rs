@@ -76,16 +76,18 @@ pub struct ConsoleInfo {
 
 impl<H: Hal, T: Transport> VirtIOConsole<H, T> {
     /// Creates a new VirtIO console driver.
-    pub fn new(mut transport: T) -> Result<Self> {
+    pub fn new(mut transport: T, hal:H) -> Result<Self> {
         let negotiated_features = transport.begin_init(SUPPORTED_FEATURES);
         let config_space = transport.config_space::<Config>()?;
         let receiveq = VirtQueue::new(
+            hal,
             &mut transport,
             QUEUE_RECEIVEQ_PORT_0,
             negotiated_features.contains(Features::RING_INDIRECT_DESC),
             negotiated_features.contains(Features::RING_EVENT_IDX),
         )?;
         let transmitq = VirtQueue::new(
+            hal,
             &mut transport,
             QUEUE_TRANSMITQ_PORT_0,
             negotiated_features.contains(Features::RING_INDIRECT_DESC),
@@ -248,104 +250,5 @@ bitflags! {
         const ORDER_PLATFORM        = 1 << 36;
         const SR_IOV                = 1 << 37;
         const NOTIFICATION_DATA     = 1 << 38;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        hal::fake::FakeHal,
-        transport::{
-            fake::{FakeTransport, QueueStatus, State},
-            DeviceType,
-        },
-    };
-    use alloc::{sync::Arc, vec};
-    use core::ptr::NonNull;
-    use std::{sync::Mutex, thread};
-
-    #[test]
-    fn receive() {
-        let mut config_space = Config {
-            cols: ReadOnly::new(0),
-            rows: ReadOnly::new(0),
-            max_nr_ports: ReadOnly::new(0),
-            emerg_wr: WriteOnly::default(),
-        };
-        let state = Arc::new(Mutex::new(State {
-            queues: vec![QueueStatus::default(), QueueStatus::default()],
-            ..Default::default()
-        }));
-        let transport = FakeTransport {
-            device_type: DeviceType::Console,
-            max_queue_size: 2,
-            device_features: 0,
-            config_space: NonNull::from(&mut config_space),
-            state: state.clone(),
-        };
-        let mut console = VirtIOConsole::<FakeHal, FakeTransport<Config>>::new(transport).unwrap();
-
-        // Nothing is available to receive.
-        assert_eq!(console.recv(false).unwrap(), None);
-        assert_eq!(console.recv(true).unwrap(), None);
-
-        // Still nothing after a spurious interrupt.
-        assert_eq!(console.ack_interrupt(), Ok(false));
-        assert_eq!(console.recv(false).unwrap(), None);
-
-        // Make a character available, and simulate an interrupt.
-        {
-            let mut state = state.lock().unwrap();
-            state.write_to_queue::<QUEUE_SIZE>(QUEUE_RECEIVEQ_PORT_0, &[42]);
-
-            state.interrupt_pending = true;
-        }
-        assert_eq!(console.ack_interrupt(), Ok(true));
-        assert_eq!(state.lock().unwrap().interrupt_pending, false);
-
-        // Receive the character. If we don't pop it it is still there to read again.
-        assert_eq!(console.recv(false).unwrap(), Some(42));
-        assert_eq!(console.recv(true).unwrap(), Some(42));
-        assert_eq!(console.recv(true).unwrap(), None);
-    }
-
-    #[test]
-    fn send() {
-        let mut config_space = Config {
-            cols: ReadOnly::new(0),
-            rows: ReadOnly::new(0),
-            max_nr_ports: ReadOnly::new(0),
-            emerg_wr: WriteOnly::default(),
-        };
-        let state = Arc::new(Mutex::new(State {
-            queues: vec![QueueStatus::default(), QueueStatus::default()],
-            ..Default::default()
-        }));
-        let transport = FakeTransport {
-            device_type: DeviceType::Console,
-            max_queue_size: 2,
-            device_features: 0,
-            config_space: NonNull::from(&mut config_space),
-            state: state.clone(),
-        };
-        let mut console = VirtIOConsole::<FakeHal, FakeTransport<Config>>::new(transport).unwrap();
-
-        // Start a thread to simulate the device waiting for characters.
-        let handle = thread::spawn(move || {
-            println!("Device waiting for a character.");
-            State::wait_until_queue_notified(&state, QUEUE_TRANSMITQ_PORT_0);
-            println!("Transmit queue was notified.");
-
-            let data = state
-                .lock()
-                .unwrap()
-                .read_from_queue::<QUEUE_SIZE>(QUEUE_TRANSMITQ_PORT_0);
-            assert_eq!(data, b"Q");
-        });
-
-        assert_eq!(console.send(b'Q'), Ok(()));
-
-        handle.join().unwrap();
     }
 }

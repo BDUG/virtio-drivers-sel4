@@ -39,7 +39,7 @@ pub struct VirtIOGpu<H: Hal, T: Transport> {
 
 impl<H: Hal, T: Transport> VirtIOGpu<H, T> {
     /// Create a new VirtIO-Gpu driver.
-    pub fn new(mut transport: T) -> Result<Self> {
+    pub fn new(mut transport: T,hal:H) -> Result<Self> {
         let negotiated_features = transport.begin_init(SUPPORTED_FEATURES);
 
         // read configuration space
@@ -54,12 +54,14 @@ impl<H: Hal, T: Transport> VirtIOGpu<H, T> {
         }
 
         let control_queue = VirtQueue::new(
+            hal,
             &mut transport,
             QUEUE_TRANSMIT,
             negotiated_features.contains(Features::RING_INDIRECT_DESC),
             negotiated_features.contains(Features::RING_EVENT_IDX),
         )?;
         let cursor_queue = VirtQueue::new(
+            hal,
             &mut transport,
             QUEUE_CURSOR,
             negotiated_features.contains(Features::RING_INDIRECT_DESC),
@@ -95,7 +97,7 @@ impl<H: Hal, T: Transport> VirtIOGpu<H, T> {
     }
 
     /// Setup framebuffer
-    pub fn setup_framebuffer(&mut self) -> Result<&mut [u8]> {
+    pub fn setup_framebuffer(&mut self, hal: H) -> Result<&mut [u8]> {
         // get display info
         let display_info = self.get_display_info()?;
         info!("=> {:?}", display_info);
@@ -110,7 +112,7 @@ impl<H: Hal, T: Transport> VirtIOGpu<H, T> {
 
         // alloc continuous pages for the frame buffer
         let size = display_info.rect.width * display_info.rect.height * 4;
-        let frame_buffer_dma = Dma::new(pages(size as usize), BufferDirection::DriverToDevice)?;
+        let frame_buffer_dma = Dma::new(hal,pages(size as usize), BufferDirection::DriverToDevice)?;
 
         // resource_attach_backing
         self.resource_attach_backing(RESOURCE_ID_FB, frame_buffer_dma.paddr() as u64, size)?;
@@ -136,6 +138,7 @@ impl<H: Hal, T: Transport> VirtIOGpu<H, T> {
     /// Set the pointer shape and position.
     pub fn setup_cursor(
         &mut self,
+        hal: H,
         cursor_image: &[u8],
         pos_x: u32,
         pos_y: u32,
@@ -146,7 +149,7 @@ impl<H: Hal, T: Transport> VirtIOGpu<H, T> {
         if cursor_image.len() != size as usize {
             return Err(Error::InvalidParam);
         }
-        let cursor_buffer_dma = Dma::new(pages(size as usize), BufferDirection::DriverToDevice)?;
+        let cursor_buffer_dma = Dma::new(hal, pages(size as usize), BufferDirection::DriverToDevice)?;
         let buf = unsafe { cursor_buffer_dma.raw_slice().as_mut() };
         buf.copy_from_slice(cursor_image);
 

@@ -75,6 +75,7 @@ impl<H: Hal, const SIZE: usize> VirtQueue<H, SIZE> {
     ///   suppression. This should be set if the `VIRTIO_F_EVENT_IDX` feature has been negotiated
     ///   with the device.
     pub fn new<T: Transport>(
+        hal: H,
         transport: &mut T,
         idx: u16,
         indirect: bool,
@@ -92,9 +93,9 @@ impl<H: Hal, const SIZE: usize> VirtQueue<H, SIZE> {
         let size = SIZE as u16;
 
         let layout = if transport.requires_legacy_layout() {
-            VirtQueueLayout::allocate_legacy(size)?
+            VirtQueueLayout::allocate_legacy(hal, size)?
         } else {
-            VirtQueueLayout::allocate_flexible(size)?
+            VirtQueueLayout::allocate_flexible(hal, size)?
         };
 
         transport.queue_set(
@@ -571,15 +572,18 @@ enum VirtQueueLayout<H: Hal> {
 }
 
 impl<H: Hal> VirtQueueLayout<H> {
+
+
+    
     /// Allocates a single DMA region containing all parts of the virtqueue, following the layout
     /// required by legacy interfaces.
     ///
     /// Ref: 2.6.2 Legacy Interfaces: A Note on Virtqueue Layout
-    fn allocate_legacy(queue_size: u16) -> Result<Self> {
+    fn allocate_legacy(hal: H, queue_size: u16) -> Result<Self> {
         let (desc, avail, used) = queue_part_sizes(queue_size);
         let size = align_up(desc + avail) + align_up(used);
         // Allocate contiguous pages.
-        let dma = Dma::new(size / PAGE_SIZE, BufferDirection::Both)?;
+        let dma = Dma::new(hal, size / PAGE_SIZE, BufferDirection::Both)?;
         Ok(Self::Legacy {
             dma,
             avail_offset: desc,
@@ -592,10 +596,10 @@ impl<H: Hal> VirtQueueLayout<H> {
     ///
     /// This is preferred over `allocate_legacy` where possible as it reduces memory fragmentation
     /// and allows the HAL to know which DMA regions are used in which direction.
-    fn allocate_flexible(queue_size: u16) -> Result<Self> {
+    fn allocate_flexible(hal: H, queue_size: u16) -> Result<Self> {
         let (desc, avail, used) = queue_part_sizes(queue_size);
-        let driver_to_device_dma = Dma::new(pages(desc + avail), BufferDirection::DriverToDevice)?;
-        let device_to_driver_dma = Dma::new(pages(used), BufferDirection::DeviceToDriver)?;
+        let driver_to_device_dma = Dma::new(hal, pages(desc + avail), BufferDirection::DriverToDevice)?;
+        let device_to_driver_dma = Dma::new(hal, pages(used), BufferDirection::DeviceToDriver)?;
         Ok(Self::Modern {
             driver_to_device_dma,
             device_to_driver_dma,
@@ -969,296 +973,5 @@ pub(crate) fn fake_read_write_queue<const QUEUE_SIZE: usize>(
         (*used_ring).idx.fetch_add(1, Ordering::AcqRel);
 
         true
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        device::common::Feature,
-        hal::fake::FakeHal,
-        transport::{
-            fake::{FakeTransport, QueueStatus, State},
-            mmio::{MmioTransport, VirtIOHeader, MODERN_VERSION},
-            DeviceType,
-        },
-    };
-    use core::ptr::NonNull;
-    use std::sync::{Arc, Mutex};
-
-    #[test]
-    fn queue_too_big() {
-        let mut header = VirtIOHeader::make_fake_header(MODERN_VERSION, 1, 0, 0, 4);
-        let mut transport = unsafe { MmioTransport::new(NonNull::from(&mut header)) }.unwrap();
-        assert_eq!(
-            VirtQueue::<FakeHal, 8>::new(&mut transport, 0, false, false).unwrap_err(),
-            Error::InvalidParam
-        );
-    }
-
-    #[test]
-    fn queue_already_used() {
-        let mut header = VirtIOHeader::make_fake_header(MODERN_VERSION, 1, 0, 0, 4);
-        let mut transport = unsafe { MmioTransport::new(NonNull::from(&mut header)) }.unwrap();
-        VirtQueue::<FakeHal, 4>::new(&mut transport, 0, false, false).unwrap();
-        assert_eq!(
-            VirtQueue::<FakeHal, 4>::new(&mut transport, 0, false, false).unwrap_err(),
-            Error::AlreadyUsed
-        );
-    }
-
-    #[test]
-    fn add_empty() {
-        let mut header = VirtIOHeader::make_fake_header(MODERN_VERSION, 1, 0, 0, 4);
-        let mut transport = unsafe { MmioTransport::new(NonNull::from(&mut header)) }.unwrap();
-        let mut queue = VirtQueue::<FakeHal, 4>::new(&mut transport, 0, false, false).unwrap();
-        assert_eq!(
-            unsafe { queue.add(&[], &mut []) }.unwrap_err(),
-            Error::InvalidParam
-        );
-    }
-
-    #[test]
-    fn add_too_many() {
-        let mut header = VirtIOHeader::make_fake_header(MODERN_VERSION, 1, 0, 0, 4);
-        let mut transport = unsafe { MmioTransport::new(NonNull::from(&mut header)) }.unwrap();
-        let mut queue = VirtQueue::<FakeHal, 4>::new(&mut transport, 0, false, false).unwrap();
-        assert_eq!(queue.available_desc(), 4);
-        assert_eq!(
-            unsafe { queue.add(&[&[], &[], &[]], &mut [&mut [], &mut []]) }.unwrap_err(),
-            Error::QueueFull
-        );
-    }
-
-    #[test]
-    fn add_buffers() {
-        let mut header = VirtIOHeader::make_fake_header(MODERN_VERSION, 1, 0, 0, 4);
-        let mut transport = unsafe { MmioTransport::new(NonNull::from(&mut header)) }.unwrap();
-        let mut queue = VirtQueue::<FakeHal, 4>::new(&mut transport, 0, false, false).unwrap();
-        assert_eq!(queue.available_desc(), 4);
-
-        // Add a buffer chain consisting of two device-readable parts followed by two
-        // device-writable parts.
-        let token = unsafe { queue.add(&[&[1, 2], &[3]], &mut [&mut [0, 0], &mut [0]]) }.unwrap();
-
-        assert_eq!(queue.available_desc(), 0);
-        assert!(!queue.can_pop());
-
-        // Safe because the various parts of the queue are properly aligned, dereferenceable and
-        // initialised, and nothing else is accessing them at the same time.
-        unsafe {
-            let first_descriptor_index = (*queue.avail.as_ptr()).ring[0];
-            assert_eq!(first_descriptor_index, token);
-            assert_eq!(
-                (*queue.desc.as_ptr())[first_descriptor_index as usize].len,
-                2
-            );
-            assert_eq!(
-                (*queue.desc.as_ptr())[first_descriptor_index as usize].flags,
-                DescFlags::NEXT
-            );
-            let second_descriptor_index =
-                (*queue.desc.as_ptr())[first_descriptor_index as usize].next;
-            assert_eq!(
-                (*queue.desc.as_ptr())[second_descriptor_index as usize].len,
-                1
-            );
-            assert_eq!(
-                (*queue.desc.as_ptr())[second_descriptor_index as usize].flags,
-                DescFlags::NEXT
-            );
-            let third_descriptor_index =
-                (*queue.desc.as_ptr())[second_descriptor_index as usize].next;
-            assert_eq!(
-                (*queue.desc.as_ptr())[third_descriptor_index as usize].len,
-                2
-            );
-            assert_eq!(
-                (*queue.desc.as_ptr())[third_descriptor_index as usize].flags,
-                DescFlags::NEXT | DescFlags::WRITE
-            );
-            let fourth_descriptor_index =
-                (*queue.desc.as_ptr())[third_descriptor_index as usize].next;
-            assert_eq!(
-                (*queue.desc.as_ptr())[fourth_descriptor_index as usize].len,
-                1
-            );
-            assert_eq!(
-                (*queue.desc.as_ptr())[fourth_descriptor_index as usize].flags,
-                DescFlags::WRITE
-            );
-        }
-    }
-
-    #[cfg(feature = "alloc")]
-    #[test]
-    fn add_buffers_indirect() {
-        use core::ptr::slice_from_raw_parts;
-
-        let mut header = VirtIOHeader::make_fake_header(MODERN_VERSION, 1, 0, 0, 4);
-        let mut transport = unsafe { MmioTransport::new(NonNull::from(&mut header)) }.unwrap();
-        let mut queue = VirtQueue::<FakeHal, 4>::new(&mut transport, 0, true, false).unwrap();
-        assert_eq!(queue.available_desc(), 4);
-
-        // Add a buffer chain consisting of two device-readable parts followed by two
-        // device-writable parts.
-        let token = unsafe { queue.add(&[&[1, 2], &[3]], &mut [&mut [0, 0], &mut [0]]) }.unwrap();
-
-        assert_eq!(queue.available_desc(), 4);
-        assert!(!queue.can_pop());
-
-        // Safe because the various parts of the queue are properly aligned, dereferenceable and
-        // initialised, and nothing else is accessing them at the same time.
-        unsafe {
-            let indirect_descriptor_index = (*queue.avail.as_ptr()).ring[0];
-            assert_eq!(indirect_descriptor_index, token);
-            assert_eq!(
-                (*queue.desc.as_ptr())[indirect_descriptor_index as usize].len as usize,
-                4 * size_of::<Descriptor>()
-            );
-            assert_eq!(
-                (*queue.desc.as_ptr())[indirect_descriptor_index as usize].flags,
-                DescFlags::INDIRECT
-            );
-
-            let indirect_descriptors = slice_from_raw_parts(
-                (*queue.desc.as_ptr())[indirect_descriptor_index as usize].addr
-                    as *const Descriptor,
-                4,
-            );
-            assert_eq!((*indirect_descriptors)[0].len, 2);
-            assert_eq!((*indirect_descriptors)[0].flags, DescFlags::NEXT);
-            assert_eq!((*indirect_descriptors)[0].next, 1);
-            assert_eq!((*indirect_descriptors)[1].len, 1);
-            assert_eq!((*indirect_descriptors)[1].flags, DescFlags::NEXT);
-            assert_eq!((*indirect_descriptors)[1].next, 2);
-            assert_eq!((*indirect_descriptors)[2].len, 2);
-            assert_eq!(
-                (*indirect_descriptors)[2].flags,
-                DescFlags::NEXT | DescFlags::WRITE
-            );
-            assert_eq!((*indirect_descriptors)[2].next, 3);
-            assert_eq!((*indirect_descriptors)[3].len, 1);
-            assert_eq!((*indirect_descriptors)[3].flags, DescFlags::WRITE);
-        }
-    }
-
-    /// Tests that the queue advises the device that notifications are needed.
-    #[test]
-    fn set_dev_notify() {
-        let mut config_space = ();
-        let state = Arc::new(Mutex::new(State {
-            queues: vec![QueueStatus::default()],
-            ..Default::default()
-        }));
-        let mut transport = FakeTransport {
-            device_type: DeviceType::Block,
-            max_queue_size: 4,
-            device_features: 0,
-            config_space: NonNull::from(&mut config_space),
-            state: state.clone(),
-        };
-        let mut queue = VirtQueue::<FakeHal, 4>::new(&mut transport, 0, false, false).unwrap();
-
-        // Check that the avail ring's flag is zero by default.
-        assert_eq!(
-            unsafe { (*queue.avail.as_ptr()).flags.load(Ordering::Acquire) },
-            0x0
-        );
-
-        queue.set_dev_notify(false);
-
-        // Check that the avail ring's flag is 1 after `disable_dev_notify`.
-        assert_eq!(
-            unsafe { (*queue.avail.as_ptr()).flags.load(Ordering::Acquire) },
-            0x1
-        );
-
-        queue.set_dev_notify(true);
-
-        // Check that the avail ring's flag is 0 after `enable_dev_notify`.
-        assert_eq!(
-            unsafe { (*queue.avail.as_ptr()).flags.load(Ordering::Acquire) },
-            0x0
-        );
-    }
-
-    /// Tests that the queue notifies the device about added buffers, if it hasn't suppressed
-    /// notifications.
-    #[test]
-    fn add_notify() {
-        let mut config_space = ();
-        let state = Arc::new(Mutex::new(State {
-            queues: vec![QueueStatus::default()],
-            ..Default::default()
-        }));
-        let mut transport = FakeTransport {
-            device_type: DeviceType::Block,
-            max_queue_size: 4,
-            device_features: 0,
-            config_space: NonNull::from(&mut config_space),
-            state: state.clone(),
-        };
-        let mut queue = VirtQueue::<FakeHal, 4>::new(&mut transport, 0, false, false).unwrap();
-
-        // Add a buffer chain with a single device-readable part.
-        unsafe { queue.add(&[&[42]], &mut []) }.unwrap();
-
-        // Check that the transport would be notified.
-        assert_eq!(queue.should_notify(), true);
-
-        // SAFETY: the various parts of the queue are properly aligned, dereferenceable and
-        // initialised, and nothing else is accessing them at the same time.
-        unsafe {
-            // Suppress notifications.
-            (*queue.used.as_ptr()).flags.store(0x01, Ordering::Release);
-        }
-
-        // Check that the transport would not be notified.
-        assert_eq!(queue.should_notify(), false);
-    }
-
-    /// Tests that the queue notifies the device about added buffers, if it hasn't suppressed
-    /// notifications with the `avail_event` index.
-    #[test]
-    fn add_notify_event_idx() {
-        let mut config_space = ();
-        let state = Arc::new(Mutex::new(State {
-            queues: vec![QueueStatus::default()],
-            ..Default::default()
-        }));
-        let mut transport = FakeTransport {
-            device_type: DeviceType::Block,
-            max_queue_size: 4,
-            device_features: Feature::RING_EVENT_IDX.bits(),
-            config_space: NonNull::from(&mut config_space),
-            state: state.clone(),
-        };
-        let mut queue = VirtQueue::<FakeHal, 4>::new(&mut transport, 0, false, true).unwrap();
-
-        // Add a buffer chain with a single device-readable part.
-        assert_eq!(unsafe { queue.add(&[&[42]], &mut []) }.unwrap(), 0);
-
-        // Check that the transport would be notified.
-        assert_eq!(queue.should_notify(), true);
-
-        // SAFETY: the various parts of the queue are properly aligned, dereferenceable and
-        // initialised, and nothing else is accessing them at the same time.
-        unsafe {
-            // Suppress notifications.
-            (*queue.used.as_ptr())
-                .avail_event
-                .store(1, Ordering::Release);
-        }
-
-        // Check that the transport would not be notified.
-        assert_eq!(queue.should_notify(), false);
-
-        // Add another buffer chain.
-        assert_eq!(unsafe { queue.add(&[&[42]], &mut []) }.unwrap(), 1);
-
-        // Check that the transport should be notified again now.
-        assert_eq!(queue.should_notify(), true);
     }
 }

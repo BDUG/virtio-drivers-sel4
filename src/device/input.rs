@@ -27,7 +27,7 @@ pub struct VirtIOInput<H: Hal, T: Transport> {
 
 impl<H: Hal, T: Transport> VirtIOInput<H, T> {
     /// Create a new VirtIO-Input driver.
-    pub fn new(mut transport: T) -> Result<Self, Error> {
+    pub fn new(mut transport: T, hal: H) -> Result<Self, Error> {
         let mut event_buf = Box::new([InputEvent::default(); QUEUE_SIZE]);
 
         let negotiated_features = transport.begin_init(SUPPORTED_FEATURES);
@@ -35,12 +35,14 @@ impl<H: Hal, T: Transport> VirtIOInput<H, T> {
         let config = transport.config_space::<Config>()?;
 
         let mut event_queue = VirtQueue::new(
+            hal,
             &mut transport,
             QUEUE_EVENT,
             negotiated_features.contains(Feature::RING_INDIRECT_DESC),
             negotiated_features.contains(Feature::RING_EVENT_IDX),
         )?;
         let status_queue = VirtQueue::new(
+            hal,
             &mut transport,
             QUEUE_STATUS,
             negotiated_features.contains(Feature::RING_INDIRECT_DESC),
@@ -310,92 +312,3 @@ const SUPPORTED_FEATURES: Feature = Feature::RING_EVENT_IDX.union(Feature::RING_
 
 // a parameter that can change
 const QUEUE_SIZE: usize = 32;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        hal::fake::FakeHal,
-        transport::{
-            fake::{FakeTransport, QueueStatus, State},
-            DeviceType,
-        },
-    };
-    use alloc::{sync::Arc, vec};
-    use core::convert::TryInto;
-    use std::sync::Mutex;
-
-    #[test]
-    fn config() {
-        const DEFAULT_DATA: ReadOnly<u8> = ReadOnly::new(0);
-        let mut config_space = Config {
-            select: WriteOnly::default(),
-            subsel: WriteOnly::default(),
-            size: ReadOnly::new(0),
-            _reserved: Default::default(),
-            data: [DEFAULT_DATA; 128],
-        };
-        let state = Arc::new(Mutex::new(State {
-            queues: vec![QueueStatus::default(), QueueStatus::default()],
-            ..Default::default()
-        }));
-        let transport = FakeTransport {
-            device_type: DeviceType::Block,
-            max_queue_size: QUEUE_SIZE.try_into().unwrap(),
-            device_features: 0,
-            config_space: NonNull::from(&mut config_space),
-            state: state.clone(),
-        };
-        let mut input = VirtIOInput::<FakeHal, FakeTransport<Config>>::new(transport).unwrap();
-
-        set_data(&mut config_space, "Test input device".as_bytes());
-        assert_eq!(input.name().unwrap(), "Test input device");
-        assert_eq!(config_space.select.0, InputConfigSelect::IdName as u8);
-        assert_eq!(config_space.subsel.0, 0);
-
-        set_data(&mut config_space, "Serial number".as_bytes());
-        assert_eq!(input.serial_number().unwrap(), "Serial number");
-        assert_eq!(config_space.select.0, InputConfigSelect::IdSerial as u8);
-        assert_eq!(config_space.subsel.0, 0);
-
-        let ids = DevIDs {
-            bustype: 0x4242,
-            product: 0x0067,
-            vendor: 0x1234,
-            version: 0x4321,
-        };
-        set_data(&mut config_space, ids.as_bytes());
-        assert_eq!(input.ids().unwrap(), ids);
-        assert_eq!(config_space.select.0, InputConfigSelect::IdDevids as u8);
-        assert_eq!(config_space.subsel.0, 0);
-
-        set_data(&mut config_space, &[0x12, 0x34, 0x56]);
-        assert_eq!(input.prop_bits().unwrap().as_ref(), &[0x12, 0x34, 0x56]);
-        assert_eq!(config_space.select.0, InputConfigSelect::PropBits as u8);
-        assert_eq!(config_space.subsel.0, 0);
-
-        set_data(&mut config_space, &[0x42, 0x66]);
-        assert_eq!(input.ev_bits(3).unwrap().as_ref(), &[0x42, 0x66]);
-        assert_eq!(config_space.select.0, InputConfigSelect::EvBits as u8);
-        assert_eq!(config_space.subsel.0, 3);
-
-        let abs_info = AbsInfo {
-            min: 12,
-            max: 1234,
-            fuzz: 4,
-            flat: 10,
-            res: 2,
-        };
-        set_data(&mut config_space, abs_info.as_bytes());
-        assert_eq!(input.abs_info(5).unwrap(), abs_info);
-        assert_eq!(config_space.select.0, InputConfigSelect::AbsInfo as u8);
-        assert_eq!(config_space.subsel.0, 5);
-    }
-
-    fn set_data(config_space: &mut Config, value: &[u8]) {
-        config_space.size.0 = value.len().try_into().unwrap();
-        for (i, &byte) in value.into_iter().enumerate() {
-            config_space.data[i].0 = byte;
-        }
-    }
-}

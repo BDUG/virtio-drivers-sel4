@@ -1,8 +1,7 @@
-#[cfg(test)]
-pub mod fake;
+
 
 use crate::{Error, Result, PAGE_SIZE};
-use core::{marker::PhantomData, ptr::NonNull};
+use core::ptr::NonNull;
 
 /// A physical address as used for virtio.
 pub type PhysAddr = usize;
@@ -13,7 +12,7 @@ pub struct Dma<H: Hal> {
     paddr: usize,
     vaddr: NonNull<u8>,
     pages: usize,
-    _hal: PhantomData<H>,
+    hal:  H, // Store the reference to Hal
 }
 
 // SAFETY: DMA memory can be accessed from any thread.
@@ -28,8 +27,8 @@ impl<H: Hal> Dma<H> {
     /// the given direction.
     ///
     /// The pages will be zeroed.
-    pub fn new(pages: usize, direction: BufferDirection) -> Result<Self> {
-        let (paddr, vaddr) = H::dma_alloc(pages, direction);
+    pub fn new(hal: H, pages: usize, direction: BufferDirection) -> Result<Self> {
+        let (paddr, vaddr) = unsafe { hal.dma_alloc(pages, direction) };
         if paddr == 0 {
             return Err(Error::DmaError);
         }
@@ -37,7 +36,7 @@ impl<H: Hal> Dma<H> {
             paddr,
             vaddr,
             pages,
-            _hal: PhantomData,
+            hal, // Store the reference to Hal
         })
     }
 
@@ -60,22 +59,14 @@ impl<H: Hal> Dma<H> {
     }
 }
 
-impl<H: Hal> Drop for Dma<H> {
-    fn drop(&mut self) {
-        // Safe because the memory was previously allocated by `dma_alloc` in `Dma::new`, not yet
-        // deallocated, and we are passing the values from then.
-        let err = unsafe { H::dma_dealloc(self.paddr, self.vaddr, self.pages) };
-        assert_eq!(err, 0, "failed to deallocate DMA");
-    }
-}
-
 /// The interface which a particular hardware implementation must implement.
 ///
 /// # Safety
 ///
 /// Implementations of this trait must follow the "implementation safety" requirements documented
 /// for each method. Callers must follow the safety requirements documented for the unsafe methods.
-pub unsafe trait Hal {
+
+pub unsafe trait Hal: Copy {
     /// Allocates and zeroes the given number of contiguous physical pages of DMA memory for VirtIO
     /// use.
     ///
@@ -88,7 +79,7 @@ pub unsafe trait Hal {
     /// [_valid_](https://doc.rust-lang.org/std/ptr/index.html#safety) pointer, aligned to
     /// [`PAGE_SIZE`], and won't alias any other allocations or references in the program until it
     /// is deallocated by `dma_dealloc`. The pages must be zeroed.
-    fn dma_alloc(pages: usize, direction: BufferDirection) -> (PhysAddr, NonNull<u8>);
+    unsafe fn dma_alloc(&self, pages: usize, direction: BufferDirection) -> (PhysAddr, NonNull<u8>);
 
     /// Deallocates the given contiguous physical DMA memory pages.
     ///

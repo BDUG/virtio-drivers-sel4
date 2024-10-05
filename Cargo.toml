@@ -1,16 +1,13 @@
 [package]
-name = "virtio-drivers"
+name = "virtio-drivers-sel4"
 version = "0.7.5"
 license = "MIT"
 authors = [
-  "Jiajie Chen <noc@jiegec.ac.cn>",
-  "Runji Wang <wangrunji0408@163.com>",
-  "Yuekai Jia <equation618@gmail.com>",
-  "Andrew Walbran <qwandor@google.com>",
+  "dirk.bangel@gmx.de",
 ]
 edition = "2021"
-description = "VirtIO guest drivers."
-repository = "https://github.com/rcore-os/virtio-drivers"
+description = "VirtIO guest drivers used in context of SeL4"
+repository = "https://github.com/BDUG/virtio-drivers-sel4"
 keywords = ["virtio"]
 categories = ["hardware-support", "no-std"]
 

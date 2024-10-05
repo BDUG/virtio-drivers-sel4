@@ -4,7 +4,11 @@
 [![docs.rs page](https://docs.rs/virtio-drivers/badge.svg)](https://docs.rs/virtio-drivers)
 [![CI](https://github.com/rcore-os/virtio-drivers/workflows/CI/badge.svg?branch=master)](https://github.com/rcore-os/virtio-drivers/actions)
 
-VirtIO guest drivers in Rust. For **no_std** environment.
+VirtIO guest drivers in Rust. 
+
+For **no_std** environment using the SeL4 kernel with its Rust extension.
+
+Primary difference is that the paging and DMA happens outside this framework.
 
 ## Support status
 

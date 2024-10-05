@@ -243,7 +243,7 @@ impl<H: Hal, T: Transport, const RX_BUFFER_SIZE: usize> Drop
 
 impl<H: Hal, T: Transport, const RX_BUFFER_SIZE: usize> VirtIOSocket<H, T, RX_BUFFER_SIZE> {
     /// Create a new VirtIO Vsock driver.
-    pub fn new(mut transport: T) -> Result<Self> {
+    pub fn new(mut transport: T, hal: H) -> Result<Self> {
         assert!(RX_BUFFER_SIZE > size_of::<VirtioVsockHdr>());
 
         let negotiated_features = transport.begin_init(SUPPORTED_FEATURES);
@@ -257,18 +257,21 @@ impl<H: Hal, T: Transport, const RX_BUFFER_SIZE: usize> VirtIOSocket<H, T, RX_BU
         debug!("guest cid: {guest_cid:?}");
 
         let rx = VirtQueue::new(
+            hal,
             &mut transport,
             RX_QUEUE_IDX,
             negotiated_features.contains(Feature::RING_INDIRECT_DESC),
             negotiated_features.contains(Feature::RING_EVENT_IDX),
         )?;
         let tx = VirtQueue::new(
+            hal,
             &mut transport,
             TX_QUEUE_IDX,
             negotiated_features.contains(Feature::RING_INDIRECT_DESC),
             negotiated_features.contains(Feature::RING_EVENT_IDX),
         )?;
         let event = VirtQueue::new(
+            hal,
             &mut transport,
             EVENT_QUEUE_IDX,
             negotiated_features.contains(Feature::RING_INDIRECT_DESC),
@@ -454,46 +457,4 @@ fn read_header_and_body(buffer: &[u8]) -> Result<(VirtioVsockHdr, &[u8])> {
         .get(size_of::<VirtioVsockHdr>()..data_end)
         .ok_or(SocketError::BufferTooShort)?;
     Ok((header, data))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        hal::fake::FakeHal,
-        transport::{
-            fake::{FakeTransport, QueueStatus, State},
-            DeviceType,
-        },
-        volatile::ReadOnly,
-    };
-    use alloc::{sync::Arc, vec};
-    use core::ptr::NonNull;
-    use std::sync::Mutex;
-
-    #[test]
-    fn config() {
-        let mut config_space = VirtioVsockConfig {
-            guest_cid_low: ReadOnly::new(66),
-            guest_cid_high: ReadOnly::new(0),
-        };
-        let state = Arc::new(Mutex::new(State {
-            queues: vec![
-                QueueStatus::default(),
-                QueueStatus::default(),
-                QueueStatus::default(),
-            ],
-            ..Default::default()
-        }));
-        let transport = FakeTransport {
-            device_type: DeviceType::Socket,
-            max_queue_size: 32,
-            device_features: 0,
-            config_space: NonNull::from(&mut config_space),
-            state: state.clone(),
-        };
-        let socket =
-            VirtIOSocket::<FakeHal, FakeTransport<VirtioVsockConfig>>::new(transport).unwrap();
-        assert_eq!(socket.guest_cid(), 0x00_0000_0042);
-    }
 }

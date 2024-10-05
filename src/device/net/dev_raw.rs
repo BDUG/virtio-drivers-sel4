@@ -25,7 +25,7 @@ pub struct VirtIONetRaw<H: Hal, T: Transport, const QUEUE_SIZE: usize> {
 
 impl<H: Hal, T: Transport, const QUEUE_SIZE: usize> VirtIONetRaw<H, T, QUEUE_SIZE> {
     /// Create a new VirtIO-Net driver.
-    pub fn new(mut transport: T) -> Result<Self> {
+    pub fn new(mut transport: T, hal: H) -> Result<Self> {
         let negotiated_features = transport.begin_init(SUPPORTED_FEATURES);
         info!("negotiated_features {:?}", negotiated_features);
         // read configuration space
@@ -41,12 +41,14 @@ impl<H: Hal, T: Transport, const QUEUE_SIZE: usize> VirtIONetRaw<H, T, QUEUE_SIZ
             );
         }
         let send_queue = VirtQueue::new(
+            hal,
             &mut transport,
             QUEUE_TRANSMIT,
             negotiated_features.contains(Features::RING_INDIRECT_DESC),
             negotiated_features.contains(Features::RING_EVENT_IDX),
         )?;
         let recv_queue = VirtQueue::new(
+            hal,
             &mut transport,
             QUEUE_RECEIVE,
             negotiated_features.contains(Features::RING_INDIRECT_DESC),

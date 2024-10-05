@@ -24,8 +24,8 @@ pub struct VirtIONet<H: Hal, T: Transport, const QUEUE_SIZE: usize> {
 
 impl<H: Hal, T: Transport, const QUEUE_SIZE: usize> VirtIONet<H, T, QUEUE_SIZE> {
     /// Create a new VirtIO-Net driver.
-    pub fn new(transport: T, buf_len: usize) -> Result<Self> {
-        let mut inner = VirtIONetRaw::new(transport)?;
+    pub fn new(transport: T, hal: H, buf_len: usize) -> Result<Self> {
+        let mut inner = VirtIONetRaw::new(transport, hal)?;
 
         const NONE_BUF: Option<RxBuffer> = None;
         let mut rx_buffers = [NONE_BUF; QUEUE_SIZE];

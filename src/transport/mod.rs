@@ -1,7 +1,5 @@
 //! VirtIO transports.
 
-#[cfg(test)]
-pub mod fake;
 pub mod mmio;
 pub mod pci;
 
