@@ -62,6 +62,7 @@ pub struct VirtQueue<H: Hal, const SIZE: usize> {
     indirect: bool,
     #[cfg(feature = "alloc")]
     indirect_lists: [Option<NonNull<[Descriptor]>>; SIZE],
+    hal: H,
 }
 
 impl<H: Hal, const SIZE: usize> VirtQueue<H, SIZE> {
@@ -140,6 +141,7 @@ impl<H: Hal, const SIZE: usize> VirtQueue<H, SIZE> {
             indirect,
             #[cfg(feature = "alloc")]
             indirect_lists: [NONE; SIZE],
+            hal,
         })
     }
 
@@ -224,7 +226,7 @@ impl<H: Hal, const SIZE: usize> VirtQueue<H, SIZE> {
             // Safe because our caller promises that the buffers live at least until `pop_used`
             // returns them.
             unsafe {
-                desc.set_buf::<H>(buffer, direction, DescFlags::NEXT);
+                desc.set_buf::<H>(self.hal, buffer, direction, DescFlags::NEXT);
             }
             last = self.free_head;
             self.free_head = desc.next;
@@ -258,7 +260,7 @@ impl<H: Hal, const SIZE: usize> VirtQueue<H, SIZE> {
             // Safe because our caller promises that the buffers live at least until `pop_used`
             // returns them.
             unsafe {
-                desc.set_buf::<H>(buffer, direction, DescFlags::NEXT);
+                desc.set_buf::<H>(self.hal, buffer, direction, DescFlags::NEXT);
             }
             desc.next = (i + 1) as u16;
         }
@@ -280,6 +282,7 @@ impl<H: Hal, const SIZE: usize> VirtQueue<H, SIZE> {
         self.free_head = direct_desc.next;
         unsafe {
             direct_desc.set_buf::<H>(
+                self.hal,
                 Box::leak(indirect_list).as_bytes().into(),
                 BufferDirection::DriverToDevice,
                 DescFlags::INDIRECT,
@@ -433,9 +436,9 @@ impl<H: Hal, const SIZE: usize> VirtQueue<H, SIZE> {
                 head_desc.unset_buf();
                 self.num_used -= 1;
                 head_desc.next = original_free_head;
-
+                
                 unsafe {
-                    H::unshare(
+                    self.hal.unshare(
                         paddr as usize,
                         indirect_list.as_bytes_mut().into(),
                         BufferDirection::DriverToDevice,
@@ -452,7 +455,7 @@ impl<H: Hal, const SIZE: usize> VirtQueue<H, SIZE> {
                     unsafe {
                         // Unshare the buffer (and perhaps copy its contents back to the original
                         // buffer).
-                        H::unshare(indirect_list[i].addr as usize, buffer, direction);
+                        self.hal.unshare(indirect_list[i].addr as usize, buffer, direction);
                     }
                 }
                 drop(indirect_list);
@@ -480,7 +483,7 @@ impl<H: Hal, const SIZE: usize> VirtQueue<H, SIZE> {
                 // from which we got `paddr`.
                 unsafe {
                     // Unshare the buffer (and perhaps copy its contents back to the original buffer).
-                    H::unshare(paddr as usize, buffer, direction);
+                    self.hal.unshare(paddr as usize, buffer, direction);
                 }
             }
 
@@ -717,13 +720,14 @@ impl Descriptor {
     /// The caller must ensure that the buffer lives at least as long as the descriptor is active.
     unsafe fn set_buf<H: Hal>(
         &mut self,
+        hal: H,
         buf: NonNull<[u8]>,
         direction: BufferDirection,
         extra_flags: DescFlags,
     ) {
         // Safe because our caller promises that the buffer is valid.
         unsafe {
-            self.addr = H::share(buf, direction) as u64;
+            self.addr = hal.share(buf, direction) as u64;
         }
         self.len = buf.len().try_into().unwrap();
         self.flags = extra_flags

@@ -88,7 +88,7 @@ pub unsafe trait Hal: Copy {
     /// The memory must have been allocated by `dma_alloc` on the same `Hal` implementation, and not
     /// yet deallocated. `pages` must be the same number passed to `dma_alloc` originally, and both
     /// `paddr` and `vaddr` must be the values returned by `dma_alloc`.
-    unsafe fn dma_dealloc(paddr: PhysAddr, vaddr: NonNull<u8>, pages: usize) -> i32;
+    unsafe fn dma_dealloc(&self, paddr: PhysAddr, vaddr: NonNull<u8>, pages: usize) -> i32;
 
     /// Converts a physical address used for MMIO to a virtual address which the driver can access.
     ///
@@ -106,7 +106,7 @@ pub unsafe trait Hal: Copy {
     ///
     /// The `paddr` and `size` must describe a valid MMIO region. The implementation may validate it
     /// in some way (and panic if it is invalid) but is not guaranteed to.
-    unsafe fn mmio_phys_to_virt(paddr: PhysAddr, size: usize) -> NonNull<u8>;
+    unsafe fn mmio_phys_to_virt(&self, paddr: PhysAddr, size: usize) -> NonNull<u8>;
 
     /// Shares the given memory range with the device, and returns the physical address that the
     /// device can use to access it.
@@ -118,7 +118,7 @@ pub unsafe trait Hal: Copy {
     ///
     /// The buffer must be a valid pointer to a non-empty memory range which will not be accessed by
     /// any other thread for the duration of this method call.
-    unsafe fn share(buffer: NonNull<[u8]>, direction: BufferDirection) -> PhysAddr;
+    unsafe fn share(&self, buffer: NonNull<[u8]>, direction: BufferDirection) -> PhysAddr;
 
     /// Unshares the given memory range from the device and (if necessary) copies it back to the
     /// original buffer.
@@ -128,7 +128,7 @@ pub unsafe trait Hal: Copy {
     /// The buffer must be a valid pointer to a non-empty memory range which will not be accessed by
     /// any other thread for the duration of this method call. The `paddr` must be the value
     /// previously returned by the corresponding `share` call.
-    unsafe fn unshare(paddr: PhysAddr, buffer: NonNull<[u8]>, direction: BufferDirection);
+    unsafe fn unshare(&self, paddr: PhysAddr, buffer: NonNull<[u8]>, direction: BufferDirection);
 }
 
 /// The direction in which a buffer is passed.

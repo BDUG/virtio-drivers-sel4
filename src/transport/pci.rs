@@ -102,6 +102,7 @@ impl PciTransport {
     /// The PCI device must already have had its BARs allocated.
     pub fn new<H: Hal>(
         root: &mut PciRoot,
+        hal: H,
         device_function: DeviceFunction,
     ) -> Result<Self, VirtioPciError> {
         let device_vendor = root.config_read_word(device_function, 0);
@@ -159,6 +160,7 @@ impl PciTransport {
 
         let common_cfg = get_bar_region::<H, _>(
             root,
+            hal,
             device_function,
             &common_cfg.ok_or(VirtioPciError::MissingCommonConfig)?,
         )?;
@@ -169,10 +171,11 @@ impl PciTransport {
                 notify_off_multiplier,
             ));
         }
-        let notify_region = get_bar_region_slice::<H, _>(root, device_function, &notify_cfg)?;
+        let notify_region = get_bar_region_slice::<H, _>(root, hal, device_function, &notify_cfg)?;
 
         let isr_status = get_bar_region::<H, _>(
             root,
+            hal,
             device_function,
             &isr_cfg.ok_or(VirtioPciError::MissingIsrConfig)?,
         )?;
@@ -180,6 +183,7 @@ impl PciTransport {
         let config_space = if let Some(device_cfg) = device_cfg {
             Some(get_bar_region_slice::<H, _>(
                 root,
+                hal,
                 device_function,
                 &device_cfg,
             )?)
@@ -390,6 +394,7 @@ struct VirtioCapabilityInfo {
 
 fn get_bar_region<H: Hal, T>(
     root: &mut PciRoot,
+    hal: H,
     device_function: DeviceFunction,
     struct_info: &VirtioCapabilityInfo,
 ) -> Result<NonNull<T>, VirtioPciError> {
@@ -408,7 +413,9 @@ fn get_bar_region<H: Hal, T>(
     let paddr = bar_address as PhysAddr + struct_info.offset as PhysAddr;
     // Safe because the paddr and size describe a valid MMIO region, at least according to the PCI
     // bus.
-    let vaddr = unsafe { H::mmio_phys_to_virt(paddr, struct_info.length as usize) };
+    let vaddr = unsafe { 
+        hal.mmio_phys_to_virt(paddr, struct_info.length as usize) 
+    };
     if vaddr.as_ptr() as usize % align_of::<T>() != 0 {
         return Err(VirtioPciError::Misaligned {
             vaddr,
@@ -420,10 +427,11 @@ fn get_bar_region<H: Hal, T>(
 
 fn get_bar_region_slice<H: Hal, T>(
     root: &mut PciRoot,
+    hal: H,
     device_function: DeviceFunction,
     struct_info: &VirtioCapabilityInfo,
 ) -> Result<NonNull<[T]>, VirtioPciError> {
-    let ptr = get_bar_region::<H, T>(root, device_function, struct_info)?;
+    let ptr = get_bar_region::<H, T>(root, hal, device_function, struct_info)?;
     Ok(nonnull_slice_from_raw_parts(
         ptr,
         struct_info.length as usize / size_of::<T>(),
